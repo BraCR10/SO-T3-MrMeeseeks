@@ -48,11 +48,153 @@
  * ============================================================================
  */
 
+#define _GNU_SOURCE
+#include <semaphore.h>
+#include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define INPUT_SIZE 256
+#define MAX_LEVELS 64
+#define MAX_FILE_DESCRIPTOR 1024
+
+typedef struct {
+    pid_t pid;
+    pid_t ppid;
+    int level;
+    int instance;
+} MeeseeksIdentity;
+
+typedef struct {
+    sem_t lock;
+    int instancesPerLevel[MAX_LEVELS];
+    int totalCreated;
+    int aliveCount;
+    int maxLevel;
+} SharedState;
+
+typedef struct {
+    SharedState *shared;
+    MeeseeksIdentity me;
+} Meeseeks;
+
+/* ---------------------------------------------------------------- Utilities */
+
+static void say(const MeeseeksIdentity *me, const char *format, ...) {
+    char line[INPUT_SIZE * 2];
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(line, sizeof line, format, arguments);
+    va_end(arguments);
+    printf("%*s[pid %d, ppid %d] %s\n", (me->level - 1) * 2, "", me->pid, me->ppid, line);
+}
+
+/* ------------------------------------------------------------- Shared state */
+
+static SharedState *createSharedState(void) {
+    SharedState *shared = mmap(NULL, sizeof(SharedState), PROT_READ | PROT_WRITE,
+                               MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (shared == MAP_FAILED) {
+        perror("mmap");
+        exit(EXIT_FAILURE);
+    }
+    // El segundo argumento en 1 hace que el semáforo se comparta entre procesos y no entre hilos
+    sem_init(&shared->lock, 1, 1);
+    return shared;
+}
+
+static void destroySharedState(SharedState *shared) {
+    sem_destroy(&shared->lock);
+    munmap(shared, sizeof(SharedState));
+}
+
+static void resetSharedCounters(SharedState *shared) {
+    sem_wait(&shared->lock);
+    memset(shared->instancesPerLevel, 0, sizeof shared->instancesPerLevel);
+    shared->totalCreated = 0;
+    shared->aliveCount = 0;
+    shared->maxLevel = 0;
+    sem_post(&shared->lock);
+}
+
+static int registerMeeseeks(SharedState *shared, int level) {
+    sem_wait(&shared->lock);
+    int instance = ++shared->instancesPerLevel[level];
+    shared->totalCreated++;
+    if (level > shared->maxLevel) {
+        shared->maxLevel = level;
+    }
+    sem_post(&shared->lock);
+    return instance;
+}
+
+static void reserveSlots(SharedState *shared, int count) {
+    sem_wait(&shared->lock);
+    shared->aliveCount += count;
+    sem_post(&shared->lock);
+}
+
+static void releaseSlot(SharedState *shared) {
+    sem_wait(&shared->lock);
+    shared->aliveCount--;
+    sem_post(&shared->lock);
+}
+
+/* ----------------------------------------------------------------- Meeseeks */
+
+static void closeInheritedFileDescriptors(void) {
+    // El hijo hereda los pipes del padre y de sus hermanos; se cierran para que cada pipe tenga un solo dueño
+    for (int fileDescriptor = STDERR_FILENO + 1; fileDescriptor < MAX_FILE_DESCRIPTOR; fileDescriptor++) {
+        close(fileDescriptor);
+    }
+}
+
+static void runMeeseeks(SharedState *shared, int level) {
+    srand((unsigned)time(NULL) ^ ((unsigned)getpid() << 16));
+    if (level == 1) {
+        // El Meeseeks original crea su propio grupo de procesos; todos sus descendientes lo heredan
+        setpgid(0, 0);
+    }
+
+    Meeseeks self = { .shared = shared };
+    self.me = (MeeseeksIdentity){ getpid(), getppid(), level, registerMeeseeks(shared, level) };
+    say(&self.me, "Hi, I'm Mr. Meeseeks! Look at Meeeee. (%d, %d, %d, %d)",
+        self.me.pid, self.me.ppid, self.me.level, self.me.instance);
+
+    say(&self.me, "Goodbye!");
+    releaseSlot(shared);
+    exit(EXIT_SUCCESS);
+}
+
+static pid_t summonMeeseeks(SharedState *shared, int level) {
+    pid_t parentPid = getpid();
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        exit(EXIT_FAILURE);
+    }
+    if (pid == 0) {
+        // Si el padre muere, el kernel mata al hijo; así nunca quedan Meeseeks huérfanos
+        prctl(PR_SET_PDEATHSIG, SIGKILL);
+        if (getppid() != parentPid) {
+            exit(EXIT_FAILURE);
+        }
+        closeInheritedFileDescriptors();
+        runMeeseeks(shared, level);
+    }
+    return pid;
+}
+
+/* ---------------------------------------------------------------------- Box */
 
 static void clearScreen(void) {
     // Solo se limpia en una terminal real, para que las salidas guardadas en archivos no tengan códigos ANSI
@@ -133,8 +275,19 @@ static void showHelp(void) {
     printf("   whether it was completed and how many Meeseeks were summoned.\n");
 }
 
+static void runTask(SharedState *shared) {
+    resetSharedCounters(shared);
+    reserveSlots(shared, 1);
+    pid_t rootPid = summonMeeseeks(shared, 1);
+    setpgid(rootPid, rootPid);
+    waitpid(rootPid, NULL, 0);
+    printf("\nMeeseeks summoned for this request: %d\n", shared->totalCreated);
+}
+
 int main(void) {
     char option[INPUT_SIZE];
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    SharedState *shared = createSharedState();
 
     while (1) {
         clearScreen();
@@ -145,7 +298,10 @@ int main(void) {
 
         if (strcmp(option, "4") == 0) {
             showHelp();
-        } else if (strcmp(option, "1") == 0 || strcmp(option, "2") == 0 || strcmp(option, "3") == 0) {
+        } else if (strcmp(option, "1") == 0) {
+            printf("\n");
+            runTask(shared);
+        } else if (strcmp(option, "2") == 0 || strcmp(option, "3") == 0) {
             printf("\nNot available yet.\n");
         } else {
             printf("\nInvalid option. Choose a number from 1 to 5.\n");
@@ -154,5 +310,6 @@ int main(void) {
     }
 
     printf("\nGoodbye from the Mr. Meeseeks Box!\n");
+    destroySharedState(shared);
     return 0;
 }
