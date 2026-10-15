@@ -50,6 +50,7 @@
 
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <poll.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -66,6 +67,11 @@
 #define INPUT_SIZE 256
 #define MAX_LEVELS 64
 #define MAX_FILE_DESCRIPTOR 1024
+
+#define EASY_DIFFICULTY 85.0
+#define RANDOM_WORK_TIME -1.0
+#define MIN_RANDOM_WORK_SECONDS 0.5
+#define MAX_RANDOM_WORK_SECONDS 5.0
 
 typedef struct {
     pid_t pid;
@@ -89,6 +95,9 @@ typedef enum { MESSAGE_REQUEST, MESSAGE_SOLVED, MESSAGE_FAILED, MESSAGE_STOP } M
 typedef struct {
     MessageType type;
     TaskType taskType;
+    double difficulty;
+    double workSeconds;
+    double simulatedSeconds;
     char text[INPUT_SIZE];
     MeeseeksIdentity solver;
 } Message;
@@ -107,6 +116,14 @@ typedef struct {
     Message request;
 } Meeseeks;
 
+typedef struct {
+    TaskType type;
+    char request[INPUT_SIZE];
+    double difficulty;
+    int difficultyWasRandom;
+    double workSeconds;
+} TaskLog;
+
 /* ---------------------------------------------------------------- Utilities */
 
 static struct timespec currentTime(void) {
@@ -118,6 +135,15 @@ static struct timespec currentTime(void) {
 static double secondsSince(struct timespec start) {
     struct timespec now = currentTime();
     return (now.tv_sec - start.tv_sec) + (now.tv_nsec - start.tv_nsec) / 1e9;
+}
+
+static double randomUniform(double min, double max) {
+    return min + (max - min) * ((double)rand() / RAND_MAX);
+}
+
+static double randomDifficulty(void) {
+    // Irwin-Hall: el promedio de 3 uniformes forma una campana centrada en 50 que nunca sale de 0 a 100
+    return (randomUniform(0, 100) + randomUniform(0, 100) + randomUniform(0, 100)) / 3.0;
 }
 
 static void say(const MeeseeksIdentity *me, const char *format, ...) {
@@ -394,15 +420,72 @@ static Message executeProgram(Meeseeks *self) {
     return outcomeMessage(MESSAGE_SOLVED, self->me, text);
 }
 
+static double workTime(const Message *request) {
+    if (request->workSeconds == RANDOM_WORK_TIME) {
+        return randomUniform(MIN_RANDOM_WORK_SECONDS, MAX_RANDOM_WORK_SECONDS);
+    }
+    return request->workSeconds;
+}
+
+static int canSolve(double difficulty) {
+    if (difficulty > EASY_DIFFICULTY) {
+        return 1;
+    }
+    // La confianza del Meeseeks es la dificultad al cuadrado: con 10 la probabilidad baja de 10 % a 1 %
+    double confidence = (difficulty / 100.0) * (difficulty / 100.0);
+    return randomUniform(0, 1) < confidence;
+}
+
+static int workUnlessStopped(int fromParent, double seconds) {
+    // Trabajar es esperar en el pipe del padre: si llega STOP o el padre muere, el Meeseeks deja de trabajar
+    struct pollfd parentPipe = { .fd = fromParent, .events = POLLIN };
+    return poll(&parentPipe, 1, (int)(seconds * 1000)) == 0;
+}
+
+static Message stopWorking(Meeseeks *self) {
+    say(&self->me, "Another Meeseeks solved the request. My job here is done, goodbye!");
+    return outcomeMessage(MESSAGE_STOP, self->me, "");
+}
+
+static Message attemptTextTask(Meeseeks *self) {
+    double difficulty = self->request.difficulty;
+    double seconds = workTime(&self->request);
+
+    say(&self->me, "Working on \"%s\" (difficulty %.2f, %.2f s) ...", self->request.text, difficulty, seconds);
+    if (!workUnlessStopped(self->fromParent, seconds)) {
+        return stopWorking(self);
+    }
+
+    if (canSolve(difficulty)) {
+        say(&self->me, "I did it! Request completed, thanks for letting me help! Goodbye!");
+        Message outcome = outcomeMessage(MESSAGE_SOLVED, self->me, "");
+        outcome.simulatedSeconds = self->request.simulatedSeconds + seconds;
+        return outcome;
+    }
+    say(&self->me, "This is harder than I thought. Existence is pain! Goodbye!");
+    return outcomeMessage(MESSAGE_FAILED, self->me, "");
+}
+
+static void announceOutcome(const Meeseeks *self, const Message *outcome) {
+    const MeeseeksIdentity *solver = &outcome->solver;
+    if (outcome->type == MESSAGE_SOLVED) {
+        say(&self->me, "Request \"%s\" completed! It was solved by Mr. Meeseeks (%d, %d, %d, %d).",
+            self->request.text, solver->pid, solver->ppid, solver->level, solver->instance);
+    } else {
+        say(&self->me, "Request \"%s\" could not be completed.", self->request.text);
+    }
+}
+
 static Message attendRequest(Meeseeks *self) {
     switch (self->request.taskType) {
+        case TASK_TEXT:
+            return attemptTextTask(self);
         case TASK_CALCULATE:
             return calculate(self);
         case TASK_EXECUTE:
             return executeProgram(self);
-        default:
-            return outcomeMessage(MESSAGE_SOLVED, self->me, "request received");
     }
+    return outcomeMessage(MESSAGE_FAILED, self->me, "unknown task");
 }
 
 static void runMeeseeks(SharedState *shared, int level, int fromParent, int toParent) {
@@ -420,6 +503,9 @@ static void runMeeseeks(SharedState *shared, int level, int fromParent, int toPa
     Message outcome = outcomeMessage(MESSAGE_FAILED, self.me, "no request received");
     if (receiveMessage(fromParent, &self.request)) {
         outcome = attendRequest(&self);
+        if (level == 1 && self.request.taskType == TASK_TEXT) {
+            announceOutcome(&self, &outcome);
+        }
     }
 
     sendMessage(toParent, &outcome);
@@ -545,16 +631,130 @@ static void showHelp(void) {
     printf("   whether it was completed and how many Meeseeks were summoned.\n");
 }
 
-static void runTask(SharedState *shared, const Message *request) {
+static const char *taskTypeName(TaskType type) {
+    switch (type) {
+        case TASK_TEXT:
+            return "Text task";
+        case TASK_CALCULATE:
+            return "Calculate";
+        case TASK_EXECUTE:
+            return "Execute";
+    }
+    return "Unknown";
+}
+
+static TaskLog newTaskLog(TaskType type) {
+    TaskLog log = { .type = type, .difficulty = -1, .workSeconds = 0 };
+    return log;
+}
+
+static void showTaskScreen(const TaskLog *log) {
+    clearScreen();
+    printf("=== %s ===\n\n", taskTypeName(log->type));
+    if (log->request[0] != '\0') {
+        printf("Request:    %s\n", log->request);
+    }
+    if (log->difficulty >= 0) {
+        printf("Difficulty: %.2f%s\n", log->difficulty, log->difficultyWasRandom ? " (chosen by luck)" : "");
+    }
+    if (log->workSeconds == RANDOM_WORK_TIME) {
+        printf("Work time:  random (%.1f to %.1f s per Meeseeks)\n", MIN_RANDOM_WORK_SECONDS, MAX_RANDOM_WORK_SECONDS);
+    } else if (log->workSeconds > 0) {
+        printf("Work time:  %.2f s per Meeseeks\n", log->workSeconds);
+    }
+    printf("\n");
+}
+
+static int parseNumber(const char *text, double min, double max, double *value) {
+    char *end;
+    *value = strtod(text, &end);
+    return end != text && *end == '\0' && *value >= min && *value <= max;
+}
+
+static int askRequest(TaskLog *log) {
+    const char *prompt = log->type == TASK_TEXT ? "What do you need? "
+                       : log->type == TASK_CALCULATE ? "Expression to calculate: "
+                       : "Command to execute: ";
+    do {
+        if (!readLine(prompt, log->request, sizeof log->request)) {
+            return 0;
+        }
+    } while (log->request[0] == '\0');
+    return 1;
+}
+
+static int askDifficulty(TaskLog *log) {
+    char input[INPUT_SIZE];
+    while (readLine("Difficulty from 0 (impossible) to 100 (very easy), or press Enter for random: ", input, sizeof input)) {
+        if (input[0] == '\0') {
+            log->difficulty = randomDifficulty();
+            log->difficultyWasRandom = 1;
+            return 1;
+        }
+        if (parseNumber(input, 0, 100, &log->difficulty)) {
+            return 1;
+        }
+        printf("Please enter a number between 0 and 100.\n");
+    }
+    return 0;
+}
+
+static int askWorkTime(TaskLog *log) {
+    char input[INPUT_SIZE];
+    while (readLine("Work time in seconds per Meeseeks, or press Enter for random (0.5 to 5): ", input, sizeof input)) {
+        if (input[0] == '\0') {
+            log->workSeconds = RANDOM_WORK_TIME;
+            return 1;
+        }
+        if (parseNumber(input, 0.1, 600, &log->workSeconds)) {
+            return 1;
+        }
+        printf("Please enter a number between 0.1 and 600.\n");
+    }
+    return 0;
+}
+
+static int setupTask(TaskLog *log) {
+    showTaskScreen(log);
+    if (!askRequest(log)) {
+        return 0;
+    }
+    if (log->type == TASK_TEXT) {
+        showTaskScreen(log);
+        if (!askDifficulty(log)) {
+            return 0;
+        }
+        showTaskScreen(log);
+        if (!askWorkTime(log)) {
+            return 0;
+        }
+    }
+    showTaskScreen(log);
+    return 1;
+}
+
+static Message requestFromLog(const TaskLog *log) {
+    Message request = {
+        .type = MESSAGE_REQUEST,
+        .taskType = log->type,
+        .difficulty = log->difficulty,
+        .workSeconds = log->workSeconds,
+    };
+    snprintf(request.text, sizeof request.text, "%s", log->request);
+    return request;
+}
+
+static void runTask(SharedState *shared, TaskLog *log) {
+    Message request = requestFromLog(log);
     resetSharedCounters(shared);
     reserveSlots(shared, 1);
-    ChildLink root = summonMeeseeks(shared, 1, request);
+    ChildLink root = summonMeeseeks(shared, 1, &request);
     setpgid(root.pid, root.pid);
     waitpid(root.pid, NULL, 0);
 
     Message outcome;
     if (receiveMessage(root.fromChild, &outcome)) {
-        printf("\nOutcome: %s (%s)\n", outcome.type == MESSAGE_SOLVED ? "completed" : "not completed", outcome.text);
+        printf("\nOutcome: %s %s\n", outcome.type == MESSAGE_SOLVED ? "completed" : "not completed", outcome.text);
     }
     printf("Meeseeks summoned for this request: %d\n", shared->totalCreated);
     closeChildLink(&root);
@@ -565,6 +765,7 @@ int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     // Escribir STOP a un Meeseeks que ya terminó no debe matar al que escribe
     signal(SIGPIPE, SIG_IGN);
+    srand((unsigned)time(NULL));
     SharedState *shared = createSharedState();
 
     while (1) {
@@ -576,27 +777,12 @@ int main(void) {
 
         if (strcmp(option, "4") == 0) {
             showHelp();
-        } else if (strcmp(option, "1") == 0) {
-            Message request = { .type = MESSAGE_REQUEST, .taskType = TASK_TEXT };
-            if (!readLine("Request: ", request.text, sizeof request.text)) {
+        } else if (strcmp(option, "1") == 0 || strcmp(option, "2") == 0 || strcmp(option, "3") == 0) {
+            TaskLog log = newTaskLog((TaskType)(option[0] - '1'));
+            if (!setupTask(&log)) {
                 break;
             }
-            printf("\n");
-            runTask(shared, &request);
-        } else if (strcmp(option, "2") == 0) {
-            Message request = { .type = MESSAGE_REQUEST, .taskType = TASK_CALCULATE };
-            if (!readLine("Expression: ", request.text, sizeof request.text)) {
-                break;
-            }
-            printf("\n");
-            runTask(shared, &request);
-        } else if (strcmp(option, "3") == 0) {
-            Message request = { .type = MESSAGE_REQUEST, .taskType = TASK_EXECUTE };
-            if (!readLine("Command: ", request.text, sizeof request.text)) {
-                break;
-            }
-            printf("\n");
-            runTask(shared, &request);
+            runTask(shared, &log);
         } else {
             printf("\nInvalid option. Choose a number from 1 to 5.\n");
         }
