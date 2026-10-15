@@ -49,6 +49,7 @@
  */
 
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -185,6 +186,144 @@ static Message outcomeMessage(MessageType type, MeeseeksIdentity solver, const c
     return message;
 }
 
+/* --------------------------------------------------------------- Calculator */
+
+/*
+ * Analizador de descenso recursivo. Cada función resuelve un nivel de
+ * precedencia y llama al siguiente más fuerte:
+ *   or -> and -> comparación -> suma/resta -> producto -> unario -> número o paréntesis
+ */
+typedef struct {
+    const char *cursor;
+    const char *error;
+} Parser;
+
+static double parseOr(Parser *parser);
+
+static void skipSpaces(Parser *parser) {
+    while (isspace((unsigned char)*parser->cursor)) {
+        parser->cursor++;
+    }
+}
+
+static int accept(Parser *parser, const char *token) {
+    skipSpaces(parser);
+    size_t length = strlen(token);
+    if (strncmp(parser->cursor, token, length) != 0) {
+        return 0;
+    }
+    parser->cursor += length;
+    return 1;
+}
+
+static double parsePrimary(Parser *parser) {
+    if (accept(parser, "(")) {
+        double value = parseOr(parser);
+        if (!accept(parser, ")")) {
+            parser->error = "missing closing parenthesis";
+        }
+        return value;
+    }
+    if (!isdigit((unsigned char)*parser->cursor) && *parser->cursor != '.') {
+        parser->error = "number expected";
+        return 0;
+    }
+    char *end;
+    double value = strtod(parser->cursor, &end);
+    parser->cursor = end;
+    return value;
+}
+
+static double parseUnary(Parser *parser) {
+    if (accept(parser, "-")) {
+        return -parseUnary(parser);
+    }
+    if (accept(parser, "!")) {
+        return !parseUnary(parser);
+    }
+    return parsePrimary(parser);
+}
+
+static double parseProduct(Parser *parser) {
+    double value = parseUnary(parser);
+    while (1) {
+        if (accept(parser, "*")) {
+            value *= parseUnary(parser);
+        } else if (accept(parser, "/")) {
+            double divisor = parseUnary(parser);
+            if (divisor == 0) {
+                parser->error = "division by zero";
+            } else {
+                value /= divisor;
+            }
+        } else if (accept(parser, "%")) {
+            // El módulo se calcula con enteros, como en C
+            long divisor = (long)parseUnary(parser);
+            if (divisor == 0) {
+                parser->error = "division by zero";
+            } else {
+                value = (long)value % divisor;
+            }
+        } else {
+            return value;
+        }
+    }
+}
+
+static double parseSum(Parser *parser) {
+    double value = parseProduct(parser);
+    while (1) {
+        if (accept(parser, "+")) {
+            value += parseProduct(parser);
+        } else if (accept(parser, "-")) {
+            value -= parseProduct(parser);
+        } else {
+            return value;
+        }
+    }
+}
+
+static double parseComparison(Parser *parser) {
+    double left = parseSum(parser);
+    // Los operadores de dos caracteres se revisan primero para que "<=" no se lea como "<"
+    if (accept(parser, "<=")) return left <= parseSum(parser);
+    if (accept(parser, ">=")) return left >= parseSum(parser);
+    if (accept(parser, "==")) return left == parseSum(parser);
+    if (accept(parser, "!=")) return left != parseSum(parser);
+    if (accept(parser, "<")) return left < parseSum(parser);
+    if (accept(parser, ">")) return left > parseSum(parser);
+    return left;
+}
+
+static double parseAnd(Parser *parser) {
+    double value = parseComparison(parser);
+    while (accept(parser, "&&")) {
+        double right = parseComparison(parser);
+        value = value && right;
+    }
+    return value;
+}
+
+static double parseOr(Parser *parser) {
+    double value = parseAnd(parser);
+    while (accept(parser, "||")) {
+        double right = parseAnd(parser);
+        value = value || right;
+    }
+    return value;
+}
+
+static int evaluateExpression(const char *expression, double *result, const char **error) {
+    Parser parser = { expression, NULL };
+    *result = parseOr(&parser);
+    skipSpaces(&parser);
+    if (parser.error == NULL && *parser.cursor != '\0') {
+        parser.error = "unexpected character";
+    }
+    *error = parser.error;
+    return parser.error == NULL;
+}
+
 /* ----------------------------------------------------------------- Meeseeks */
 
 static void closeInheritedFileDescriptors(int keepRead, int keepWrite) {
@@ -193,6 +332,31 @@ static void closeInheritedFileDescriptors(int keepRead, int keepWrite) {
         if (fileDescriptor != keepRead && fileDescriptor != keepWrite) {
             close(fileDescriptor);
         }
+    }
+}
+
+static Message calculate(Meeseeks *self) {
+    double result;
+    const char *error;
+    char text[INPUT_SIZE];
+
+    say(&self->me, "Calculating %s ...", self->request.text);
+    if (!evaluateExpression(self->request.text, &result, &error)) {
+        snprintf(text, sizeof text, "error: %s", error);
+        say(&self->me, "I couldn't calculate it (%s). Existence is pain! Goodbye!", error);
+        return outcomeMessage(MESSAGE_FAILED, self->me, text);
+    }
+    snprintf(text, sizeof text, "result %g", result);
+    say(&self->me, "%s = %g. Request completed, thanks for letting me help! Goodbye!", self->request.text, result);
+    return outcomeMessage(MESSAGE_SOLVED, self->me, text);
+}
+
+static Message attendRequest(Meeseeks *self) {
+    switch (self->request.taskType) {
+        case TASK_CALCULATE:
+            return calculate(self);
+        default:
+            return outcomeMessage(MESSAGE_SOLVED, self->me, "request received");
     }
 }
 
@@ -210,12 +374,10 @@ static void runMeeseeks(SharedState *shared, int level, int fromParent, int toPa
 
     Message outcome = outcomeMessage(MESSAGE_FAILED, self.me, "no request received");
     if (receiveMessage(fromParent, &self.request)) {
-        say(&self.me, "I received your request: \"%s\"", self.request.text);
-        outcome = outcomeMessage(MESSAGE_SOLVED, self.me, "request received");
+        outcome = attendRequest(&self);
     }
 
     sendMessage(toParent, &outcome);
-    say(&self.me, "Goodbye!");
     releaseSlot(shared);
     exit(EXIT_SUCCESS);
 }
@@ -376,7 +538,14 @@ int main(void) {
             }
             printf("\n");
             runTask(shared, &request);
-        } else if (strcmp(option, "2") == 0 || strcmp(option, "3") == 0) {
+        } else if (strcmp(option, "2") == 0) {
+            Message request = { .type = MESSAGE_REQUEST, .taskType = TASK_CALCULATE };
+            if (!readLine("Expression: ", request.text, sizeof request.text)) {
+                break;
+            }
+            printf("\n");
+            runTask(shared, &request);
+        } else if (strcmp(option, "3") == 0) {
             printf("\nNot available yet.\n");
         } else {
             printf("\nInvalid option. Choose a number from 1 to 5.\n");
