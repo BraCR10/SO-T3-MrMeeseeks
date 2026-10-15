@@ -90,6 +90,8 @@ typedef struct {
     int instancesPerLevel[MAX_LEVELS];
     int totalCreated;
     int aliveCount;
+    int peakAlive;
+    int limitReachedCount;
     int maxLevel;
 } SharedState;
 
@@ -137,6 +139,8 @@ typedef struct {
     int meeseeksCreated;
     int maxLevel;
     int meeseeksPerLevel[MAX_LEVELS];
+    int peakAlive;
+    int limitReachedCount;
     MeeseeksIdentity root;
     MeeseeksIdentity solver;
     char result[INPUT_SIZE];
@@ -197,6 +201,8 @@ static void resetSharedCounters(SharedState *shared) {
     memset(shared->instancesPerLevel, 0, sizeof shared->instancesPerLevel);
     shared->totalCreated = 0;
     shared->aliveCount = 0;
+    shared->peakAlive = 0;
+    shared->limitReachedCount = 0;
     shared->maxLevel = 0;
     sem_post(&shared->lock);
 }
@@ -218,10 +224,19 @@ static int reserveSlots(SharedState *shared, int count, int level) {
     sem_wait(&shared->lock);
     if (level < MAX_LEVELS && shared->aliveCount + count <= MAX_ALIVE_MEESEEKS) {
         shared->aliveCount += count;
+        if (shared->aliveCount > shared->peakAlive) {
+            shared->peakAlive = shared->aliveCount;
+        }
         reserved = 1;
     }
     sem_post(&shared->lock);
     return reserved;
+}
+
+static void registerLimitReached(SharedState *shared) {
+    sem_wait(&shared->lock);
+    shared->limitReachedCount++;
+    sem_post(&shared->lock);
 }
 
 static void releaseSlot(SharedState *shared) {
@@ -587,6 +602,7 @@ static Message attemptTextTask(Meeseeks *self) {
         if (!waitingForRoom) {
             say(&self->me, "Too many Meeseeks alive! I'll keep trying by myself, quietly.");
             waitingForRoom = 1;
+            registerLimitReached(self->shared);
         }
         difficulty = agedDifficulty(difficulty, helpers);
     }
@@ -748,9 +764,15 @@ static void showHelp(void) {
     printf("   would run forever, and you would have to stop it with Ctrl+C.\n\n");
 
     printf("Process limit\n");
-    printf("   To protect the system, only a limited number of Meeseeks can be alive\n");
-    printf("   at the same time. When the limit is reached, a Meeseeks keeps trying by\n");
-    printf("   itself instead of summoning helpers.\n\n");
+    printf("   To protect the system from collapsing, at most %d Meeseeks can be alive\n", MAX_ALIVE_MEESEEKS);
+    printf("   at the same time. A hard task can create 5, 25, 125, 625... processes,\n");
+    printf("   so without this limit thousands of processes could freeze the computer.\n");
+    printf("   When a Meeseeks needs helpers but there is no room, it does not create\n");
+    printf("   any: it says so once and keeps trying by itself. When other Meeseeks\n");
+    printf("   finish, room is freed and helpers can be summoned again.\n");
+    printf("   With difficulty 0 the limit stays full until the time limit ends it.\n");
+    printf("   The final report shows the peak of Meeseeks alive and how many of them\n");
+    printf("   found the limit full.\n\n");
 
     printf("5. Exit\n");
     printf("   Closes the Box and shows the final report: every task, its duration,\n");
@@ -959,6 +981,8 @@ static int runTask(SharedState *shared, TaskLog *log) {
     }
     log->meeseeksCreated = shared->totalCreated;
     log->maxLevel = shared->maxLevel;
+    log->peakAlive = shared->peakAlive;
+    log->limitReachedCount = shared->limitReachedCount;
     memcpy(log->meeseeksPerLevel, shared->instancesPerLevel, sizeof log->meeseeksPerLevel);
     closeChildLink(&root);
     return finished;
@@ -979,11 +1003,16 @@ static void printTaskLog(const TaskLog *log, int number) {
     if (log->type == TASK_TEXT && log->completed) {
         printf("  Real time:        %.3f s (without simulated work)\n", log->realSeconds);
     }
-    printf("  Meeseeks created: %d in %d level(s):", log->meeseeksCreated, log->maxLevel);
+    printf("  Meeseeks created: %d\n", log->meeseeksCreated);
     for (int level = 1; level <= log->maxLevel; level++) {
-        printf(" %d", log->meeseeksPerLevel[level]);
+        printf("    Level %-2d %6d\n", level, log->meeseeksPerLevel[level]);
     }
-    printf("\n");
+    printf("  Peak alive:       %d of %d allowed\n", log->peakAlive, MAX_ALIVE_MEESEEKS);
+    if (log->limitReachedCount > 0) {
+        printf("  Process limit:    reached, %d Meeseeks had to keep trying by themselves\n", log->limitReachedCount);
+    } else {
+        printf("  Process limit:    not reached\n");
+    }
     if (log->completed) {
         const MeeseeksIdentity *solver = &log->solver;
         printf("  Solved by:        (%d, %d, %d, %d)\n", solver->pid, solver->ppid, solver->level, solver->instance);
