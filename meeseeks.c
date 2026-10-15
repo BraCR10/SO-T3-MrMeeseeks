@@ -116,7 +116,8 @@ static void showHelp(void) {
     printf("   The task is completed only if the program exits with code 0.\n\n");
 
     printf("Time limit\n");
-    printf("   Every request has a maximum time. Press Enter for 300 seconds.\n");
+    printf("   Every request has a maximum time in minutes. Press Enter for 5 minutes.\n");
+    printf("   Decimals are allowed, for example 0.5 for 30 seconds.\n");
     printf("   If a request takes longer, PLANETARY CHAOS is declared: every Meeseeks\n");
     printf("   is terminated, the final report is shown and the Box closes.\n");
     printf("   A time limit of 0 means no limit. This is dangerous: an impossible task\n");
