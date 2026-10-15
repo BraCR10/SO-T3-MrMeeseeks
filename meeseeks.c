@@ -71,6 +71,8 @@
 #define EASY_DIFFICULTY 85.0
 #define HARD_DIFFICULTY 45.0
 #define MAX_HELPERS 10
+#define MAX_ALIVE_MEESEEKS 200
+#define FRUSTRATION_FACTOR 1.2
 #define RANDOM_WORK_TIME -1.0
 #define MIN_RANDOM_WORK_SECONDS 0.5
 #define MAX_RANDOM_WORK_SECONDS 5.0
@@ -196,10 +198,16 @@ static int registerMeeseeks(SharedState *shared, int level) {
     return instance;
 }
 
-static void reserveSlots(SharedState *shared, int count) {
+static int reserveSlots(SharedState *shared, int count, int level) {
+    // Se reservan todos los lugares o ninguno, dentro del semáforo, para que dos Meeseeks no tomen el mismo lugar
+    int reserved = 0;
     sem_wait(&shared->lock);
-    shared->aliveCount += count;
+    if (level < MAX_LEVELS && shared->aliveCount + count <= MAX_ALIVE_MEESEEKS) {
+        shared->aliveCount += count;
+        reserved = 1;
+    }
     sem_post(&shared->lock);
+    return reserved;
 }
 
 static void releaseSlot(SharedState *shared) {
@@ -422,11 +430,18 @@ static Message executeProgram(Meeseeks *self) {
     return outcomeMessage(MESSAGE_SOLVED, self->me, text);
 }
 
-static double workTime(const Message *request) {
-    if (request->workSeconds == RANDOM_WORK_TIME) {
-        return randomUniform(MIN_RANDOM_WORK_SECONDS, MAX_RANDOM_WORK_SECONDS);
+static double workTime(const Message *request, int level) {
+    double seconds = request->workSeconds;
+    if (seconds == RANDOM_WORK_TIME) {
+        seconds = randomUniform(MIN_RANDOM_WORK_SECONDS, MAX_RANDOM_WORK_SECONDS);
     }
-    return request->workSeconds;
+    if (request->difficulty == 0) {
+        // Ante lo imposible cada generación está más frustrada y trabaja un 20 % más lento que la anterior
+        for (int generation = 1; generation < level; generation++) {
+            seconds *= FRUSTRATION_FACTOR;
+        }
+    }
+    return seconds;
 }
 
 static int canSolve(double difficulty) {
@@ -508,14 +523,12 @@ static void dismissHelpers(const ChildLink children[], int count) {
     }
 }
 
-static Message askForHelp(Meeseeks *self, double difficulty, double simulatedSeconds) {
+static Message askForHelp(Meeseeks *self, int helpers, double difficulty, double simulatedSeconds) {
     ChildLink children[MAX_HELPERS];
-    int helpers = helperCount(difficulty);
     Message request = self->request;
     request.simulatedSeconds = simulatedSeconds;
 
     say(&self->me, "This is harder than I thought! Summoning %d Meeseeks to help me.", helpers);
-    reserveSlots(self->shared, helpers);
     for (int i = 0; i < helpers; i++) {
         request.difficulty = agedDifficulty(difficulty, helpers);
         children[i] = summonMeeseeks(self->shared, self->me.level + 1, &request);
@@ -531,21 +544,31 @@ static Message askForHelp(Meeseeks *self, double difficulty, double simulatedSec
 
 static Message attemptTextTask(Meeseeks *self) {
     double difficulty = self->request.difficulty;
-    double seconds = workTime(&self->request);
+    double simulatedSeconds = self->request.simulatedSeconds;
 
-    say(&self->me, "Working on \"%s\" (difficulty %.2f, %.2f s) ...", self->request.text, difficulty, seconds);
-    if (!workUnlessStopped(self->fromParent, seconds)) {
-        return stopWorking(self);
-    }
+    while (1) {
+        double seconds = workTime(&self->request, self->me.level);
+        say(&self->me, "Working on \"%s\" (difficulty %.2f, %.2f s) ...", self->request.text, difficulty, seconds);
+        if (!workUnlessStopped(self->fromParent, seconds)) {
+            return stopWorking(self);
+        }
+        simulatedSeconds += seconds;
 
-    double simulatedSeconds = self->request.simulatedSeconds + seconds;
-    if (canSolve(difficulty)) {
-        say(&self->me, "I did it! Request completed, thanks for letting me help! Goodbye!");
-        Message outcome = outcomeMessage(MESSAGE_SOLVED, self->me, "");
-        outcome.simulatedSeconds = simulatedSeconds;
-        return outcome;
+        if (canSolve(difficulty)) {
+            say(&self->me, "I did it! Request completed, thanks for letting me help! Goodbye!");
+            Message outcome = outcomeMessage(MESSAGE_SOLVED, self->me, "");
+            outcome.simulatedSeconds = simulatedSeconds;
+            return outcome;
+        }
+
+        int helpers = helperCount(difficulty);
+        if (reserveSlots(self->shared, helpers, self->me.level + 1)) {
+            return askForHelp(self, helpers, difficulty, simulatedSeconds);
+        }
+        // Plan de contingencia: sin lugar para más procesos, el Meeseeks sigue intentando solo en vez de hacer fork
+        say(&self->me, "Too many Meeseeks alive! I'll keep trying by myself.");
+        difficulty = agedDifficulty(difficulty, helpers);
     }
-    return askForHelp(self, difficulty, simulatedSeconds);
 }
 
 static void announceOutcome(const Meeseeks *self, const Message *outcome) {
@@ -829,7 +852,7 @@ static Message requestFromLog(const TaskLog *log) {
 static void runTask(SharedState *shared, TaskLog *log) {
     Message request = requestFromLog(log);
     resetSharedCounters(shared);
-    reserveSlots(shared, 1);
+    reserveSlots(shared, 1, 1);
     ChildLink root = summonMeeseeks(shared, 1, &request);
     setpgid(root.pid, root.pid);
     waitpid(root.pid, NULL, 0);
