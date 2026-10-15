@@ -12,6 +12,6 @@ meeseeks
 # Final deliverables are submitted through Google Classroom
 *.pdf
 SO-T3-*.txt
-# Report and experiments are kept out of the repository
+
 docs/
 experiments/

@@ -1043,10 +1043,14 @@ static void printTaskLog(const TaskLog *log, int number) {
     }
     printf("  Meeseeks created: %d\n", log->meeseeksCreated);
     if (log->type == TASK_TEXT) {
+        printf("  Created per level:\n");
         for (int level = 1; level <= log->maxLevel; level++) {
             char label[INPUT_SIZE];
             snprintf(label, sizeof label, "Level %d:", level);
             printf("    %-16s%d\n", label, log->meeseeksPerLevel[level]);
+        }
+        if (log->completed) {
+            printf("  Solved at level:  %d\n", log->solver.level);
         }
         printf("  Peak alive:       %d of %d\n", log->peakAlive, MAX_ALIVE_MEESEEKS);
         if (log->limitReachedCount > 0) {
