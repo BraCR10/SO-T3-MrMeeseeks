@@ -774,7 +774,7 @@ static void showHelp(void) {
     printf("     85.01 to 100   one Meeseeks always solves it\n");
     printf("     45.01 to 85    if a Meeseeks fails, it summons 2 or more helpers\n");
     printf("     0.01 to 45     if a Meeseeks fails, it summons 5 or more helpers\n");
-    printf("     0              impossible, it is never solved\n");
+    printf("     0              impossible, never solved; each level works 20%% slower\n");
     printf("   Helpers split the work, so the task gets easier on every level.\n");
     printf("\n");
     printf("2. CALCULATE    One Meeseeks solves a math or logic operation.\n");
