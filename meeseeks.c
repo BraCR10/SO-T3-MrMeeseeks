@@ -559,10 +559,13 @@ static Message askForHelp(Meeseeks *self, int helpers, double difficulty, double
 static Message attemptTextTask(Meeseeks *self) {
     double difficulty = self->request.difficulty;
     double simulatedSeconds = self->request.simulatedSeconds;
+    int waitingForRoom = 0;
 
     while (1) {
         double seconds = workTime(&self->request, self->me.level);
-        say(&self->me, "Working on \"%s\" (difficulty %.2f, %.2f s) ...", self->request.text, difficulty, seconds);
+        if (!waitingForRoom) {
+            say(&self->me, "Working on \"%s\" (difficulty %.2f, %.2f s) ...", self->request.text, difficulty, seconds);
+        }
         if (!workUnlessStopped(self->fromParent, seconds)) {
             return stopWorking(self);
         }
@@ -579,8 +582,12 @@ static Message attemptTextTask(Meeseeks *self) {
         if (reserveSlots(self->shared, helpers, self->me.level + 1)) {
             return askForHelp(self, helpers, difficulty, simulatedSeconds);
         }
-        // Plan de contingencia: sin lugar para más procesos, el Meeseeks sigue intentando solo en vez de hacer fork
-        say(&self->me, "Too many Meeseeks alive! I'll keep trying by myself.");
+        // Plan de contingencia: sin lugar para más procesos, el Meeseeks sigue intentando solo en vez de hacer fork.
+        // Lo avisa una sola vez para que cientos de Meeseeks reintentando no inunden la pantalla.
+        if (!waitingForRoom) {
+            say(&self->me, "Too many Meeseeks alive! I'll keep trying by myself, quietly.");
+            waitingForRoom = 1;
+        }
         difficulty = agedDifficulty(difficulty, helpers);
     }
 }
