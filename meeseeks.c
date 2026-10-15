@@ -759,56 +759,52 @@ static void showMenu(void) {
 
 static void showHelp(void) {
     clearScreen();
-    printf("=== Help ===\n\n");
-
-    printf("The Mr. Meeseeks Box summons a Mr. Meeseeks (a new process) for every\n");
-    printf("request. Requests are attended one at a time.\n\n");
-
-    printf("1. Text task\n");
-    printf("   Ask for anything, for example \"I want to be happy\". The task is simulated.\n");
-    printf("   - Difficulty: 0 to 100. 100 is very easy, 0 is impossible.\n");
-    printf("     Press Enter to let luck decide (bell curve centered at 50).\n");
-    printf("   - Work time: seconds each Meeseeks spends trying before it knows if it\n");
-    printf("     succeeded. Press Enter for a random time between 0.5 and 5 seconds.\n");
-    printf("   - From 85.01 to 100 a single Meeseeks solves the task.\n");
-    printf("     From 45.01 to 85 a Meeseeks that fails summons at least 2 helpers.\n");
-    printf("     From 0 to 45 a Meeseeks that fails summons at least 5 helpers.\n");
-    printf("     Helpers share the work, so the task gets easier on every level.\n");
-    printf("   - Difficulty 0 is impossible: it is never solved, Meeseeks keep being\n");
-    printf("     summoned and each generation works slower than the previous one.\n\n");
-
-    printf("2. Calculate\n");
-    printf("   A single Meeseeks evaluates a math or logic operation.\n");
-    printf("   Operators: + - * / %% ( )  < > <= >= == !=  && || !\n");
-    printf("   Logic results are 1 (true) or 0 (false).\n");
-    printf("   Example: (3 + 4) * 2 > 10 && 1\n\n");
-
-    printf("3. Execute\n");
-    printf("   A single Meeseeks runs a program, for example: ls -l\n");
-    printf("   The task is completed only if the program exits with code 0.\n\n");
-
-    printf("Time limit\n");
-    printf("   Every request has a maximum time in minutes. Press Enter for 5 minutes.\n");
-    printf("   Decimals are allowed, for example 0.5 for 30 seconds.\n");
-    printf("   If a request takes longer, PLANETARY CHAOS is declared: every Meeseeks\n");
-    printf("   is terminated, the final report is shown and the Box closes.\n");
-    printf("   A time limit of 0 means no limit. This is dangerous: an impossible task\n");
-    printf("   would run forever, and you would have to stop it with Ctrl+C.\n\n");
-
-    printf("Process limit\n");
-    printf("   To protect the system from collapsing, at most %d Meeseeks can be alive\n", MAX_ALIVE_MEESEEKS);
-    printf("   at the same time. A hard task can create 5, 25, 125, 625... processes,\n");
-    printf("   so without this limit thousands of processes could freeze the computer.\n");
-    printf("   When a Meeseeks needs helpers but there is no room, it does not create\n");
-    printf("   any: it says so once and keeps trying by itself. When other Meeseeks\n");
-    printf("   finish, room is freed and helpers can be summoned again.\n");
-    printf("   With difficulty 0 the limit stays full until the time limit ends it.\n");
-    printf("   The final report shows the peak of Meeseeks alive and how many of them\n");
-    printf("   found the limit full.\n\n");
-
-    printf("5. Exit\n");
-    printf("   Closes the Box and shows the final report: every task, its duration,\n");
-    printf("   whether it was completed and how many Meeseeks were summoned.\n");
+    printf("=== Help ===\n");
+    printf("\n");
+    printf("The Box summons a Mr. Meeseeks, a new process, for every request.\n");
+    printf("Requests are attended one at a time.\n");
+    printf("\n");
+    printf("1. TEXT TASK    Ask for anything. The work is simulated.\n");
+    printf("   You will be asked for:\n");
+    printf("     Request      what you need, for example: I want to be happy\n");
+    printf("     Difficulty   0 to 100               Enter = random, around 50\n");
+    printf("     Work time    seconds per Meeseeks   Enter = random, 0.5 to 5\n");
+    printf("     Time limit   minutes                Enter = 5, 0 = no limit\n");
+    printf("   How difficulty works:\n");
+    printf("     85.01 to 100   one Meeseeks always solves it\n");
+    printf("     45.01 to 85    if a Meeseeks fails, it summons 2 or more helpers\n");
+    printf("     0.01 to 45     if a Meeseeks fails, it summons 5 or more helpers\n");
+    printf("     0              impossible, it is never solved\n");
+    printf("   Helpers split the work, so the task gets easier on every level.\n");
+    printf("\n");
+    printf("2. CALCULATE    One Meeseeks solves a math or logic operation.\n");
+    printf("     Operators    + - * / %% ( )   < > <= >= == !=   && || !\n");
+    printf("     Logic        results are 1 for true and 0 for false\n");
+    printf("     Example      (3 + 4) * 2 > 10 && 1\n");
+    printf("\n");
+    printf("3. EXECUTE      One Meeseeks runs a program and waits for it.\n");
+    printf("     Completed    only if the program exits with code 0\n");
+    printf("     Example      ls -l\n");
+    printf("     Time limit   minutes                Enter = 5, 0 = no limit\n");
+    printf("\n");
+    printf("4. HELP         Shows this screen.\n");
+    printf("\n");
+    printf("5. EXIT         Closes the Box and shows the final report.\n");
+    printf("\n");
+    printf("TIME LIMIT\n");
+    printf("   If a request takes longer than its limit, PLANETARY CHAOS is declared:\n");
+    printf("   every Meeseeks is terminated, the final report is shown and the Box closes.\n");
+    printf("   A limit of 0 disables it. Dangerous: an impossible task would never end.\n");
+    printf("\n");
+    printf("PROCESS LIMIT\n");
+    printf("   At most %d Meeseeks can be alive at the same time, so a hard task cannot\n", MAX_ALIVE_MEESEEKS);
+    printf("   freeze the computer. When there is no room, a Meeseeks does not summon\n");
+    printf("   helpers: it keeps trying by itself until other Meeseeks finish.\n");
+    printf("\n");
+    printf("FINAL REPORT\n");
+    printf("   For every task: status, total time, real time without simulated work,\n");
+    printf("   Meeseeks created per level, level where it was solved, peak of Meeseeks\n");
+    printf("   alive, process limit usage and the Meeseeks that solved it.\n");
 }
 
 static const char *taskTypeName(TaskType type) {
