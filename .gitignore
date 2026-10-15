@@ -1,0 +1,14 @@
+# Compiled binary
+meeseeks
+
+# Object files
+*.o
+
+# Editor and OS files
+*.swp
+.vscode/
+.DS_Store
+
+# Final deliverables are submitted through Google Classroom
+*.pdf
+SO-T3-*.txt
