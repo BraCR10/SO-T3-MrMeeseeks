@@ -74,6 +74,7 @@
 #define MAX_ALIVE_MEESEEKS 200
 #define FRUSTRATION_FACTOR 1.2
 #define DEFAULT_TIME_LIMIT_MINUTES 5.0
+#define MAX_TASKS 100
 #define RANDOM_WORK_TIME -1.0
 #define MIN_RANDOM_WORK_SECONDS 0.5
 #define MAX_RANDOM_WORK_SECONDS 5.0
@@ -128,6 +129,16 @@ typedef struct {
     int difficultyWasRandom;
     double workSeconds;
     double timeLimitMinutes;
+    int completed;
+    int planetaryChaos;
+    double totalSeconds;
+    double realSeconds;
+    int meeseeksCreated;
+    int maxLevel;
+    int meeseeksPerLevel[MAX_LEVELS];
+    MeeseeksIdentity root;
+    MeeseeksIdentity solver;
+    char result[INPUT_SIZE];
 } TaskLog;
 
 /* ---------------------------------------------------------------- Utilities */
@@ -919,24 +930,72 @@ static int runTask(SharedState *shared, TaskLog *log) {
     ChildLink root = summonMeeseeks(shared, 1, &request);
     setpgid(root.pid, root.pid);
 
+    log->root = (MeeseeksIdentity){ root.pid, getpid(), 1, 1 };
+
     int finished = waitWithTimeLimit(root.pid, log->timeLimitMinutes, start);
     if (!finished) {
         declarePlanetaryChaos(root.pid, log->timeLimitMinutes);
     }
-    double seconds = secondsSince(start);
+    log->totalSeconds = secondsSince(start);
+    log->realSeconds = log->totalSeconds;
+    log->planetaryChaos = !finished;
 
     Message outcome;
     if (finished && receiveMessage(root.fromChild, &outcome)) {
-        printf("\nOutcome: %s %s\n", outcome.type == MESSAGE_SOLVED ? "completed" : "not completed", outcome.text);
+        log->completed = outcome.type == MESSAGE_SOLVED;
+        log->solver = outcome.solver;
+        // El tiempo real descuenta el trabajo simulado de la cadena de Meeseeks que llevó a la solución
+        log->realSeconds = log->totalSeconds - outcome.simulatedSeconds;
+        snprintf(log->result, sizeof log->result, "%s", outcome.text);
     }
-    printf("Time: %.3f s\n", seconds);
-    printf("Meeseeks summoned for this request: %d\n", shared->totalCreated);
+    log->meeseeksCreated = shared->totalCreated;
+    log->maxLevel = shared->maxLevel;
+    memcpy(log->meeseeksPerLevel, shared->instancesPerLevel, sizeof log->meeseeksPerLevel);
     closeChildLink(&root);
     return finished;
 }
 
+static void printTaskLog(const TaskLog *log, int number) {
+    printf("Task %d [%s] \"%s\"\n", number, taskTypeName(log->type), log->request);
+    if (log->type == TASK_TEXT) {
+        printf("  Difficulty:       %.2f%s\n", log->difficulty, log->difficultyWasRandom ? " (chosen by luck)" : "");
+    }
+    printf("  Status:           %s\n", log->completed ? "completed"
+                                       : log->planetaryChaos ? "not completed (planetary chaos)"
+                                       : "not completed");
+    if (log->result[0] != '\0') {
+        printf("  Result:           %s\n", log->result);
+    }
+    printf("  Total time:       %.3f s\n", log->totalSeconds);
+    if (log->type == TASK_TEXT && log->completed) {
+        printf("  Real time:        %.3f s (without simulated work)\n", log->realSeconds);
+    }
+    printf("  Meeseeks created: %d in %d level(s):", log->meeseeksCreated, log->maxLevel);
+    for (int level = 1; level <= log->maxLevel; level++) {
+        printf(" %d", log->meeseeksPerLevel[level]);
+    }
+    printf("\n");
+    if (log->completed) {
+        const MeeseeksIdentity *solver = &log->solver;
+        printf("  Solved by:        (%d, %d, %d, %d)\n", solver->pid, solver->ppid, solver->level, solver->instance);
+    }
+}
+
+static void printReport(const TaskLog logs[], int count) {
+    int completed = 0;
+    printf("\n=== Mr. Meeseeks Box final report ===\n\n");
+    for (int i = 0; i < count; i++) {
+        printTaskLog(&logs[i], i + 1);
+        printf("\n");
+        completed += logs[i].completed;
+    }
+    printf("Tasks requested: %d   Completed: %d   Not completed: %d\n", count, completed, count - completed);
+}
+
 int main(void) {
     char option[INPUT_SIZE];
+    TaskLog logs[MAX_TASKS];
+    int logCount = 0;
     setvbuf(stdout, NULL, _IOLBF, 0);
     // Escribir STOP a un Meeseeks que ya terminó no debe matar al que escribe
     signal(SIGPIPE, SIG_IGN);
@@ -953,11 +1012,21 @@ int main(void) {
         if (strcmp(option, "4") == 0) {
             showHelp();
         } else if (strcmp(option, "1") == 0 || strcmp(option, "2") == 0 || strcmp(option, "3") == 0) {
-            TaskLog log = newTaskLog((TaskType)(option[0] - '1'));
-            if (!setupTask(&log)) {
+            if (logCount == MAX_TASKS) {
+                printf("\nThe Box is full (%d tasks). Choose 5 to exit and see the report.\n", MAX_TASKS);
+                waitForEnter();
+                continue;
+            }
+            TaskLog *log = &logs[logCount];
+            *log = newTaskLog((TaskType)(option[0] - '1'));
+            if (!setupTask(log)) {
                 break;
             }
-            if (!runTask(shared, &log)) {
+            logCount++;
+            int finished = runTask(shared, log);
+            printf("\n");
+            printTaskLog(log, logCount);
+            if (!finished) {
                 break;
             }
         } else {
@@ -966,6 +1035,7 @@ int main(void) {
         waitForEnter();
     }
 
+    printReport(logs, logCount);
     printf("\nGoodbye from the Mr. Meeseeks Box!\n");
     destroySharedState(shared);
     return 0;
