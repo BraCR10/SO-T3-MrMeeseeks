@@ -437,11 +437,11 @@ static Message calculate(Meeseeks *self) {
 
     say(&self->me, "Calculating %s ...", self->request.text);
     if (!evaluateExpression(self->request.text, &result, &error)) {
-        snprintf(text, sizeof text, "error: %s", error);
+        snprintf(text, sizeof text, "Error, %s", error);
         say(&self->me, "I couldn't calculate it (%s). Existence is pain! Goodbye!", error);
         return outcomeMessage(MESSAGE_FAILED, self->me, text);
     }
-    snprintf(text, sizeof text, "result %g", result);
+    snprintf(text, sizeof text, "%g", result);
     say(&self->me, "%s = %g. Request completed, thanks for letting me help! Goodbye!", self->request.text, result);
     return outcomeMessage(MESSAGE_SOLVED, self->me, text);
 }
@@ -468,7 +468,7 @@ static Message executeProgram(Meeseeks *self) {
     waitpid(pid, &status, 0);
     double seconds = secondsSince(start);
     int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    snprintf(text, sizeof text, "exit code %d after %.3f s", exitCode, seconds);
+    snprintf(text, sizeof text, "Exit code %d after %.3f s", exitCode, seconds);
 
     if (exitCode != 0) {
         say(&self->me, "The program failed with %s. Existence is pain! Goodbye!", text);
@@ -1010,46 +1010,59 @@ static int runTask(SharedState *shared, TaskLog *log) {
     return finished;
 }
 
-static void printTaskLog(const TaskLog *log, int number) {
-    printf("Task %d [%s] \"%s\"\n", number, taskTypeName(log->type), log->request);
-    if (log->type == TASK_TEXT) {
-        printf("  Difficulty:       %.2f%s\n", log->difficulty, log->difficultyWasRandom ? " (chosen by luck)" : "");
+static const char *taskStatus(const TaskLog *log) {
+    if (log->completed) {
+        return "Completed";
     }
-    printf("  Status:           %s\n", log->completed ? "completed"
-                                       : log->planetaryChaos ? "not completed (planetary chaos)"
-                                       : "not completed");
+    return log->planetaryChaos ? "Not completed, planetary chaos" : "Not completed";
+}
+
+static void printTaskLog(const TaskLog *log, int number) {
+    printf("Task %d: %s\n", number, taskTypeName(log->type));
+    printf("  Request:          %s\n", log->request);
+    if (log->type == TASK_TEXT) {
+        printf("  Difficulty:       %.2f%s\n", log->difficulty, log->difficultyWasRandom ? ", chosen by luck" : "");
+    }
+    printf("  Status:           %s\n", taskStatus(log));
     if (log->result[0] != '\0') {
         printf("  Result:           %s\n", log->result);
     }
     printf("  Total time:       %.3f s\n", log->totalSeconds);
     if (log->type == TASK_TEXT && log->completed) {
-        printf("  Real time:        %.3f s (without simulated work)\n", log->realSeconds);
+        printf("  Real time:        %.3f s without simulated work\n", log->realSeconds);
     }
     printf("  Meeseeks created: %d\n", log->meeseeksCreated);
-    for (int level = 1; level <= log->maxLevel; level++) {
-        printf("    Level %-2d %6d\n", level, log->meeseeksPerLevel[level]);
-    }
-    printf("  Peak alive:       %d of %d allowed\n", log->peakAlive, MAX_ALIVE_MEESEEKS);
-    if (log->limitReachedCount > 0) {
-        printf("  Process limit:    reached, %d Meeseeks had to keep trying by themselves\n", log->limitReachedCount);
-    } else {
-        printf("  Process limit:    not reached\n");
+    if (log->type == TASK_TEXT) {
+        for (int level = 1; level <= log->maxLevel; level++) {
+            char label[INPUT_SIZE];
+            snprintf(label, sizeof label, "Level %d:", level);
+            printf("    %-16s%d\n", label, log->meeseeksPerLevel[level]);
+        }
+        printf("  Peak alive:       %d of %d\n", log->peakAlive, MAX_ALIVE_MEESEEKS);
+        if (log->limitReachedCount > 0) {
+            printf("  Process limit:    Reached by %d Meeseeks\n", log->limitReachedCount);
+        } else {
+            printf("  Process limit:    Not reached\n");
+        }
     }
     if (log->completed) {
         const MeeseeksIdentity *solver = &log->solver;
-        printf("  Solved by:        (%d, %d, %d, %d)\n", solver->pid, solver->ppid, solver->level, solver->instance);
+        printf("  Solved by:        PID %d, PPID %d, level %d, instance %d\n",
+               solver->pid, solver->ppid, solver->level, solver->instance);
     }
 }
 
 static void printReport(const TaskLog logs[], int count) {
     int completed = 0;
-    printf("\n=== Mr. Meeseeks Box final report ===\n\n");
+    printf("\nMr. Meeseeks Box final report\n\n");
     for (int i = 0; i < count; i++) {
         printTaskLog(&logs[i], i + 1);
         printf("\n");
         completed += logs[i].completed;
     }
-    printf("Tasks requested: %d   Completed: %d   Not completed: %d\n", count, completed, count - completed);
+    printf("Tasks requested:  %d\n", count);
+    printf("Completed:        %d\n", completed);
+    printf("Not completed:    %d\n", count - completed);
 }
 
 int main(void) {
