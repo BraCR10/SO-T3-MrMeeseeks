@@ -73,6 +73,7 @@
 #define MAX_HELPERS 10
 #define MAX_ALIVE_MEESEEKS 200
 #define FRUSTRATION_FACTOR 1.2
+#define DEFAULT_TIME_LIMIT_MINUTES 5.0
 #define RANDOM_WORK_TIME -1.0
 #define MIN_RANDOM_WORK_SECONDS 0.5
 #define MAX_RANDOM_WORK_SECONDS 5.0
@@ -126,6 +127,7 @@ typedef struct {
     double difficulty;
     int difficultyWasRandom;
     double workSeconds;
+    double timeLimitMinutes;
 } TaskLog;
 
 /* ---------------------------------------------------------------- Utilities */
@@ -749,7 +751,7 @@ static const char *taskTypeName(TaskType type) {
 }
 
 static TaskLog newTaskLog(TaskType type) {
-    TaskLog log = { .type = type, .difficulty = -1, .workSeconds = 0 };
+    TaskLog log = { .type = type, .difficulty = -1, .workSeconds = 0, .timeLimitMinutes = -1 };
     return log;
 }
 
@@ -766,6 +768,11 @@ static void showTaskScreen(const TaskLog *log) {
         printf("Work time:  random (%.1f to %.1f s per Meeseeks)\n", MIN_RANDOM_WORK_SECONDS, MAX_RANDOM_WORK_SECONDS);
     } else if (log->workSeconds > 0) {
         printf("Work time:  %.2f s per Meeseeks\n", log->workSeconds);
+    }
+    if (log->timeLimitMinutes == 0) {
+        printf("Time limit: none (planetary chaos disabled)\n");
+    } else if (log->timeLimitMinutes > 0) {
+        printf("Time limit: %.2f minutes\n", log->timeLimitMinutes);
     }
     printf("\n");
 }
@@ -819,6 +826,34 @@ static int askWorkTime(TaskLog *log) {
     return 0;
 }
 
+static int confirmNoTimeLimit(void) {
+    char answer[INPUT_SIZE];
+    printf("\nWARNING: with no time limit, planetary chaos is never declared.\n");
+    printf("An impossible (difficulty 0) or very hard task may run forever while the\n");
+    printf("Meeseeks keep using the maximum number of processes. You would have to stop\n");
+    printf("the Box with Ctrl+C and the final report would be lost.\n");
+    if (!readLine("Continue without a time limit? [y/N]: ", answer, sizeof answer)) {
+        return 0;
+    }
+    return answer[0] == 'y' || answer[0] == 'Y';
+}
+
+static int askTimeLimit(TaskLog *log) {
+    char input[INPUT_SIZE];
+    while (readLine("Time limit in minutes (0 = no limit), or press Enter for 5: ", input, sizeof input)) {
+        if (input[0] == '\0') {
+            log->timeLimitMinutes = DEFAULT_TIME_LIMIT_MINUTES;
+            return 1;
+        }
+        if (!parseNumber(input, 0, 1440, &log->timeLimitMinutes)) {
+            printf("Please enter a number between 0 and 1440.\n");
+        } else if (log->timeLimitMinutes > 0 || confirmNoTimeLimit()) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int setupTask(TaskLog *log) {
     showTaskScreen(log);
     if (!askRequest(log)) {
@@ -831,6 +866,14 @@ static int setupTask(TaskLog *log) {
         }
         showTaskScreen(log);
         if (!askWorkTime(log)) {
+            return 0;
+        }
+    }
+    if (log->type == TASK_CALCULATE) {
+        log->timeLimitMinutes = DEFAULT_TIME_LIMIT_MINUTES;
+    } else {
+        showTaskScreen(log);
+        if (!askTimeLimit(log)) {
             return 0;
         }
     }
@@ -849,20 +892,47 @@ static Message requestFromLog(const TaskLog *log) {
     return request;
 }
 
-static void runTask(SharedState *shared, TaskLog *log) {
+static int waitWithTimeLimit(pid_t rootPid, double timeLimitMinutes, struct timespec start) {
+    // Se revisa cada 10 ms si el Meeseeks original terminó; así el error de medición es de 10 ms como máximo
+    while (waitpid(rootPid, NULL, WNOHANG) == 0) {
+        if (timeLimitMinutes > 0 && secondsSince(start) >= timeLimitMinutes * 60) {
+            return 0;
+        }
+        usleep(10000);
+    }
+    return 1;
+}
+
+static void declarePlanetaryChaos(pid_t rootPid, double timeLimitMinutes) {
+    printf("\n!!! PLANETARY CHAOS !!! The request exceeded %.2f minutes.\n", timeLimitMinutes);
+    printf("Terminating every Mr. Meeseeks...\n");
+    // Un PID negativo en kill envía la señal a todo el grupo de procesos del Meeseeks original
+    kill(-rootPid, SIGKILL);
+    waitpid(rootPid, NULL, 0);
+}
+
+static int runTask(SharedState *shared, TaskLog *log) {
     Message request = requestFromLog(log);
     resetSharedCounters(shared);
     reserveSlots(shared, 1, 1);
+    struct timespec start = currentTime();
     ChildLink root = summonMeeseeks(shared, 1, &request);
     setpgid(root.pid, root.pid);
-    waitpid(root.pid, NULL, 0);
+
+    int finished = waitWithTimeLimit(root.pid, log->timeLimitMinutes, start);
+    if (!finished) {
+        declarePlanetaryChaos(root.pid, log->timeLimitMinutes);
+    }
+    double seconds = secondsSince(start);
 
     Message outcome;
-    if (receiveMessage(root.fromChild, &outcome)) {
+    if (finished && receiveMessage(root.fromChild, &outcome)) {
         printf("\nOutcome: %s %s\n", outcome.type == MESSAGE_SOLVED ? "completed" : "not completed", outcome.text);
     }
+    printf("Time: %.3f s\n", seconds);
     printf("Meeseeks summoned for this request: %d\n", shared->totalCreated);
     closeChildLink(&root);
+    return finished;
 }
 
 int main(void) {
@@ -887,7 +957,9 @@ int main(void) {
             if (!setupTask(&log)) {
                 break;
             }
-            runTask(shared, &log);
+            if (!runTask(shared, &log)) {
+                break;
+            }
         } else {
             printf("\nInvalid option. Choose a number from 1 to 5.\n");
         }
