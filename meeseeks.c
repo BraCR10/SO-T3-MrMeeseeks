@@ -615,7 +615,10 @@ static Message attemptTextTask(Meeseeks *self) {
             return stopWorking(self);
         }
 
-        if (canSolve(difficulty) && claimSolution(self->shared)) {
+        if (canSolve(difficulty)) {
+            if (!claimSolution(self->shared)) {
+                return stopWorking(self);
+            }
             say(&self->me, "I did it! Request completed, thanks for letting me help! Goodbye!");
             Message outcome = outcomeMessage(MESSAGE_SOLVED, self->me, "");
             outcome.simulatedSeconds = simulatedSeconds;
