@@ -75,7 +75,6 @@
 #define FRUSTRATION_FACTOR 1.2
 #define DEFAULT_TIME_LIMIT_MINUTES 5.0
 #define MAX_TASKS 100
-#define RANDOM_WORK_TIME -1.0
 #define MIN_RANDOM_WORK_SECONDS 0.5
 #define MAX_RANDOM_WORK_SECONDS 5.0
 
@@ -103,6 +102,7 @@ typedef struct {
     TaskType taskType;
     double difficulty;
     double workSeconds;
+    int workTimeIsRandom;
     double simulatedSeconds;
     char text[INPUT_SIZE];
     MeeseeksIdentity solver;
@@ -128,6 +128,7 @@ typedef struct {
     double difficulty;
     int difficultyWasRandom;
     double workSeconds;
+    int workTimeWasRandom;
     double timeLimitMinutes;
     int completed;
     int planetaryChaos;
@@ -445,7 +446,7 @@ static Message executeProgram(Meeseeks *self) {
 
 static double workTime(const Message *request, int level) {
     double seconds = request->workSeconds;
-    if (seconds == RANDOM_WORK_TIME) {
+    if (request->workTimeIsRandom) {
         seconds = randomUniform(MIN_RANDOM_WORK_SECONDS, MAX_RANDOM_WORK_SECONDS);
     }
     if (request->difficulty == 0) {
@@ -775,7 +776,7 @@ static void showTaskScreen(const TaskLog *log) {
     if (log->difficulty >= 0) {
         printf("Difficulty: %.2f%s\n", log->difficulty, log->difficultyWasRandom ? " (chosen by luck)" : "");
     }
-    if (log->workSeconds == RANDOM_WORK_TIME) {
+    if (log->workTimeWasRandom) {
         printf("Work time:  random (%.1f to %.1f s per Meeseeks)\n", MIN_RANDOM_WORK_SECONDS, MAX_RANDOM_WORK_SECONDS);
     } else if (log->workSeconds > 0) {
         printf("Work time:  %.2f s per Meeseeks\n", log->workSeconds);
@@ -826,7 +827,7 @@ static int askWorkTime(TaskLog *log) {
     char input[INPUT_SIZE];
     while (readLine("Work time in seconds per Meeseeks, or press Enter for random (0.5 to 5): ", input, sizeof input)) {
         if (input[0] == '\0') {
-            log->workSeconds = RANDOM_WORK_TIME;
+            log->workTimeWasRandom = 1;
             return 1;
         }
         if (parseNumber(input, 0.1, 600, &log->workSeconds)) {
@@ -898,6 +899,7 @@ static Message requestFromLog(const TaskLog *log) {
         .taskType = log->type,
         .difficulty = log->difficulty,
         .workSeconds = log->workSeconds,
+        .workTimeIsRandom = log->workTimeWasRandom,
     };
     snprintf(request.text, sizeof request.text, "%s", log->request);
     return request;
