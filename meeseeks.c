@@ -93,6 +93,7 @@ typedef struct {
     int peakAlive;
     int limitReachedCount;
     int maxLevel;
+    int solved;
 } SharedState;
 
 typedef enum { TASK_TEXT, TASK_CALCULATE, TASK_EXECUTE } TaskType;
@@ -204,6 +205,7 @@ static void resetSharedCounters(SharedState *shared) {
     shared->peakAlive = 0;
     shared->limitReachedCount = 0;
     shared->maxLevel = 0;
+    shared->solved = 0;
     sem_post(&shared->lock);
 }
 
@@ -231,6 +233,23 @@ static int reserveSlots(SharedState *shared, int count, int level) {
     }
     sem_post(&shared->lock);
     return reserved;
+}
+
+static int claimSolution(SharedState *shared) {
+    // Solo el primer Meeseeks que lo logra se queda con la solución; sin esto, ramas lejanas podían
+    // resolverla también mientras el STOP todavía viajaba por los pipes
+    sem_wait(&shared->lock);
+    int isFirst = !shared->solved;
+    shared->solved = 1;
+    sem_post(&shared->lock);
+    return isFirst;
+}
+
+static int isSolved(SharedState *shared) {
+    sem_wait(&shared->lock);
+    int solved = shared->solved;
+    sem_post(&shared->lock);
+    return solved;
 }
 
 static void registerLimitReached(SharedState *shared) {
@@ -538,7 +557,7 @@ static Message waitForHelpers(Meeseeks *self, const ChildLink children[], int co
             }
         }
     }
-    return outcomeMessage(MESSAGE_FAILED, self->me, "");
+    return stopWorking(self);
 }
 
 static void dismissHelpers(const ChildLink children[], int count) {
@@ -585,8 +604,11 @@ static Message attemptTextTask(Meeseeks *self) {
             return stopWorking(self);
         }
         simulatedSeconds += seconds;
+        if (isSolved(self->shared)) {
+            return stopWorking(self);
+        }
 
-        if (canSolve(difficulty)) {
+        if (canSolve(difficulty) && claimSolution(self->shared)) {
             say(&self->me, "I did it! Request completed, thanks for letting me help! Goodbye!");
             Message outcome = outcomeMessage(MESSAGE_SOLVED, self->me, "");
             outcome.simulatedSeconds = simulatedSeconds;
