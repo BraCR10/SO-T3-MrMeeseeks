@@ -476,10 +476,10 @@ static Message executeProgram(Meeseeks *self) {
     snprintf(text, sizeof text, "Exit code %d after %.3f s", exitCode, seconds);
 
     if (exitCode != 0) {
-        say(&self->me, "The program failed with %s. Existence is pain! Goodbye!", text);
+        say(&self->me, "The program failed. %s. Existence is pain! Goodbye!", text);
         return outcomeMessage(MESSAGE_FAILED, self->me, text);
     }
-    say(&self->me, "The program finished with %s. Request completed, thanks for letting me help! Goodbye!", text);
+    say(&self->me, "The program finished. %s. Request completed, thanks for letting me help! Goodbye!", text);
     return outcomeMessage(MESSAGE_SOLVED, self->me, text);
 }
 
@@ -546,7 +546,7 @@ static Message waitForHelpers(Meeseeks *self, const ChildLink children[], int co
     while (pending > 0) {
         poll(pipes, count + 1, -1);
         if (pipes[count].revents != 0) {
-            return stopWorking(self);
+            return outcomeMessage(MESSAGE_STOP, self->me, "");
         }
         for (int i = 0; i < count; i++) {
             if (pipes[i].revents == 0) {
@@ -562,7 +562,7 @@ static Message waitForHelpers(Meeseeks *self, const ChildLink children[], int co
             }
         }
     }
-    return stopWorking(self);
+    return outcomeMessage(MESSAGE_STOP, self->me, "");
 }
 
 static void dismissHelpers(const ChildLink children[], int count) {
@@ -588,10 +588,12 @@ static Message askForHelp(Meeseeks *self, int helpers, double difficulty, double
     }
 
     Message outcome = waitForHelpers(self, children, helpers);
+    // Primero se despiden los hijos y después el padre, así la despedida avanza hacia atrás hasta el original
     dismissHelpers(children, helpers);
-    if (outcome.type == MESSAGE_SOLVED) {
-        say(&self->me, "One of my helpers did it! Thanks for letting me help, goodbye!");
+    if (outcome.type != MESSAGE_SOLVED) {
+        return stopWorking(self);
     }
+    say(&self->me, "One of my helpers did it! Thanks for letting me help, goodbye!");
     return outcome;
 }
 
