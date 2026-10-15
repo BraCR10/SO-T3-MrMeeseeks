@@ -50,6 +50,7 @@
 
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -460,6 +461,10 @@ static Message executeProgram(Meeseeks *self) {
     if (pid == 0) {
         close(self->fromParent);
         close(self->toParent);
+        // El programa no está en primer plano: si leyera de la terminal, Linux lo detendría para siempre
+        int devNull = open("/dev/null", O_RDONLY);
+        dup2(devNull, STDIN_FILENO);
+        close(devNull);
         execl("/bin/sh", "sh", "-c", self->request.text, (char *)NULL);
         _exit(127);
     }
