@@ -109,6 +109,17 @@ typedef struct {
 
 /* ---------------------------------------------------------------- Utilities */
 
+static struct timespec currentTime(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now;
+}
+
+static double secondsSince(struct timespec start) {
+    struct timespec now = currentTime();
+    return (now.tv_sec - start.tv_sec) + (now.tv_nsec - start.tv_nsec) / 1e9;
+}
+
 static void say(const MeeseeksIdentity *me, const char *format, ...) {
     char line[INPUT_SIZE * 2];
     va_list arguments;
@@ -351,10 +362,44 @@ static Message calculate(Meeseeks *self) {
     return outcomeMessage(MESSAGE_SOLVED, self->me, text);
 }
 
+static Message executeProgram(Meeseeks *self) {
+    char text[INPUT_SIZE];
+
+    say(&self->me, "Executing \"%s\" ...", self->request.text);
+    struct timespec start = currentTime();
+    fflush(stdout);
+    pid_t pid = fork();
+    if (pid < 0) {
+        say(&self->me, "I couldn't start the program. Existence is pain! Goodbye!");
+        return outcomeMessage(MESSAGE_FAILED, self->me, "fork failed");
+    }
+    if (pid == 0) {
+        close(self->fromParent);
+        close(self->toParent);
+        execl("/bin/sh", "sh", "-c", self->request.text, (char *)NULL);
+        _exit(127);
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    double seconds = secondsSince(start);
+    int exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    snprintf(text, sizeof text, "exit code %d after %.3f s", exitCode, seconds);
+
+    if (exitCode != 0) {
+        say(&self->me, "The program failed with %s. Existence is pain! Goodbye!", text);
+        return outcomeMessage(MESSAGE_FAILED, self->me, text);
+    }
+    say(&self->me, "The program finished with %s. Request completed, thanks for letting me help! Goodbye!", text);
+    return outcomeMessage(MESSAGE_SOLVED, self->me, text);
+}
+
 static Message attendRequest(Meeseeks *self) {
     switch (self->request.taskType) {
         case TASK_CALCULATE:
             return calculate(self);
+        case TASK_EXECUTE:
+            return executeProgram(self);
         default:
             return outcomeMessage(MESSAGE_SOLVED, self->me, "request received");
     }
@@ -546,7 +591,12 @@ int main(void) {
             printf("\n");
             runTask(shared, &request);
         } else if (strcmp(option, "3") == 0) {
-            printf("\nNot available yet.\n");
+            Message request = { .type = MESSAGE_REQUEST, .taskType = TASK_EXECUTE };
+            if (!readLine("Command: ", request.text, sizeof request.text)) {
+                break;
+            }
+            printf("\n");
+            runTask(shared, &request);
         } else {
             printf("\nInvalid option. Choose a number from 1 to 5.\n");
         }
