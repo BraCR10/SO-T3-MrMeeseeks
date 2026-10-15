@@ -69,6 +69,8 @@
 #define MAX_FILE_DESCRIPTOR 1024
 
 #define EASY_DIFFICULTY 85.0
+#define HARD_DIFFICULTY 45.0
+#define MAX_HELPERS 10
 #define RANDOM_WORK_TIME -1.0
 #define MIN_RANDOM_WORK_SECONDS 0.5
 #define MAX_RANDOM_WORK_SECONDS 5.0
@@ -447,6 +449,86 @@ static Message stopWorking(Meeseeks *self) {
     return outcomeMessage(MESSAGE_STOP, self->me, "");
 }
 
+static int helperCount(double difficulty) {
+    int minimum = difficulty <= HARD_DIFFICULTY ? 5 : 2;
+    // Cuanto más lejos de 85 está la dificultad, más ayudantes extra puede llamar (hasta 4 más con 0)
+    int extra = rand() % (1 + (int)((EASY_DIFFICULTY - difficulty) / 20));
+    return minimum + extra;
+}
+
+static double agedDifficulty(double difficulty, int helpers) {
+    if (difficulty == 0) {
+        return 0;
+    }
+    // Aging: los ayudantes se reparten lo que falta para llegar a 100, así la tarea se simplifica en cada nivel
+    return difficulty + (100 - difficulty) / helpers * randomUniform(0.5, 1.0);
+}
+
+static ChildLink summonMeeseeks(SharedState *shared, int level, const Message *request);
+static void closeChildLink(const ChildLink *child);
+
+static Message waitForHelpers(Meeseeks *self, const ChildLink children[], int count) {
+    struct pollfd pipes[MAX_HELPERS + 1];
+    for (int i = 0; i < count; i++) {
+        pipes[i] = (struct pollfd){ .fd = children[i].fromChild, .events = POLLIN };
+    }
+    pipes[count] = (struct pollfd){ .fd = self->fromParent, .events = POLLIN };
+
+    int pending = count;
+    while (pending > 0) {
+        poll(pipes, count + 1, -1);
+        if (pipes[count].revents != 0) {
+            return stopWorking(self);
+        }
+        for (int i = 0; i < count; i++) {
+            if (pipes[i].revents == 0) {
+                continue;
+            }
+            Message message;
+            int received = receiveMessage(pipes[i].fd, &message);
+            // Un descriptor negativo hace que poll ignore a ese hijo de ahí en adelante
+            pipes[i].fd = -1;
+            pending--;
+            if (received && message.type == MESSAGE_SOLVED) {
+                return message;
+            }
+        }
+    }
+    return outcomeMessage(MESSAGE_FAILED, self->me, "");
+}
+
+static void dismissHelpers(const ChildLink children[], int count) {
+    Message stop = { .type = MESSAGE_STOP };
+    for (int i = 0; i < count; i++) {
+        sendMessage(children[i].toChild, &stop);
+    }
+    for (int i = 0; i < count; i++) {
+        waitpid(children[i].pid, NULL, 0);
+        closeChildLink(&children[i]);
+    }
+}
+
+static Message askForHelp(Meeseeks *self, double difficulty, double simulatedSeconds) {
+    ChildLink children[MAX_HELPERS];
+    int helpers = helperCount(difficulty);
+    Message request = self->request;
+    request.simulatedSeconds = simulatedSeconds;
+
+    say(&self->me, "This is harder than I thought! Summoning %d Meeseeks to help me.", helpers);
+    reserveSlots(self->shared, helpers);
+    for (int i = 0; i < helpers; i++) {
+        request.difficulty = agedDifficulty(difficulty, helpers);
+        children[i] = summonMeeseeks(self->shared, self->me.level + 1, &request);
+    }
+
+    Message outcome = waitForHelpers(self, children, helpers);
+    dismissHelpers(children, helpers);
+    if (outcome.type == MESSAGE_SOLVED) {
+        say(&self->me, "One of my helpers did it! Thanks for letting me help, goodbye!");
+    }
+    return outcome;
+}
+
 static Message attemptTextTask(Meeseeks *self) {
     double difficulty = self->request.difficulty;
     double seconds = workTime(&self->request);
@@ -456,14 +538,14 @@ static Message attemptTextTask(Meeseeks *self) {
         return stopWorking(self);
     }
 
+    double simulatedSeconds = self->request.simulatedSeconds + seconds;
     if (canSolve(difficulty)) {
         say(&self->me, "I did it! Request completed, thanks for letting me help! Goodbye!");
         Message outcome = outcomeMessage(MESSAGE_SOLVED, self->me, "");
-        outcome.simulatedSeconds = self->request.simulatedSeconds + seconds;
+        outcome.simulatedSeconds = simulatedSeconds;
         return outcome;
     }
-    say(&self->me, "This is harder than I thought. Existence is pain! Goodbye!");
-    return outcomeMessage(MESSAGE_FAILED, self->me, "");
+    return askForHelp(self, difficulty, simulatedSeconds);
 }
 
 static void announceOutcome(const Meeseeks *self, const Message *outcome) {
