@@ -81,9 +81,29 @@ typedef struct {
     int maxLevel;
 } SharedState;
 
+typedef enum { TASK_TEXT, TASK_CALCULATE, TASK_EXECUTE } TaskType;
+
+typedef enum { MESSAGE_REQUEST, MESSAGE_SOLVED, MESSAGE_FAILED, MESSAGE_STOP } MessageType;
+
+typedef struct {
+    MessageType type;
+    TaskType taskType;
+    char text[INPUT_SIZE];
+    MeeseeksIdentity solver;
+} Message;
+
+typedef struct {
+    pid_t pid;
+    int toChild;
+    int fromChild;
+} ChildLink;
+
 typedef struct {
     SharedState *shared;
     MeeseeksIdentity me;
+    int fromParent;
+    int toParent;
+    Message request;
 } Meeseeks;
 
 /* ---------------------------------------------------------------- Utilities */
@@ -148,33 +168,66 @@ static void releaseSlot(SharedState *shared) {
     sem_post(&shared->lock);
 }
 
+/* -------------------------------------------------------------------- Pipes */
+
+static int sendMessage(int fileDescriptor, const Message *message) {
+    // Un mensaje más pequeño que PIPE_BUF se escribe de forma atómica: nunca llega partido ni mezclado
+    return write(fileDescriptor, message, sizeof *message) == (ssize_t)sizeof *message;
+}
+
+static int receiveMessage(int fileDescriptor, Message *message) {
+    return read(fileDescriptor, message, sizeof *message) == (ssize_t)sizeof *message;
+}
+
+static Message outcomeMessage(MessageType type, MeeseeksIdentity solver, const char *text) {
+    Message message = { .type = type, .solver = solver };
+    snprintf(message.text, sizeof message.text, "%s", text);
+    return message;
+}
+
 /* ----------------------------------------------------------------- Meeseeks */
 
-static void closeInheritedFileDescriptors(void) {
+static void closeInheritedFileDescriptors(int keepRead, int keepWrite) {
     // El hijo hereda los pipes del padre y de sus hermanos; se cierran para que cada pipe tenga un solo dueño
     for (int fileDescriptor = STDERR_FILENO + 1; fileDescriptor < MAX_FILE_DESCRIPTOR; fileDescriptor++) {
-        close(fileDescriptor);
+        if (fileDescriptor != keepRead && fileDescriptor != keepWrite) {
+            close(fileDescriptor);
+        }
     }
 }
 
-static void runMeeseeks(SharedState *shared, int level) {
+static void runMeeseeks(SharedState *shared, int level, int fromParent, int toParent) {
     srand((unsigned)time(NULL) ^ ((unsigned)getpid() << 16));
     if (level == 1) {
         // El Meeseeks original crea su propio grupo de procesos; todos sus descendientes lo heredan
         setpgid(0, 0);
     }
 
-    Meeseeks self = { .shared = shared };
+    Meeseeks self = { .shared = shared, .fromParent = fromParent, .toParent = toParent };
     self.me = (MeeseeksIdentity){ getpid(), getppid(), level, registerMeeseeks(shared, level) };
     say(&self.me, "Hi, I'm Mr. Meeseeks! Look at Meeeee. (%d, %d, %d, %d)",
         self.me.pid, self.me.ppid, self.me.level, self.me.instance);
 
+    Message outcome = outcomeMessage(MESSAGE_FAILED, self.me, "no request received");
+    if (receiveMessage(fromParent, &self.request)) {
+        say(&self.me, "I received your request: \"%s\"", self.request.text);
+        outcome = outcomeMessage(MESSAGE_SOLVED, self.me, "request received");
+    }
+
+    sendMessage(toParent, &outcome);
     say(&self.me, "Goodbye!");
     releaseSlot(shared);
     exit(EXIT_SUCCESS);
 }
 
-static pid_t summonMeeseeks(SharedState *shared, int level) {
+static ChildLink summonMeeseeks(SharedState *shared, int level, const Message *request) {
+    int toChild[2];
+    int fromChild[2];
+    if (pipe(toChild) < 0 || pipe(fromChild) < 0) {
+        perror("pipe");
+        exit(EXIT_FAILURE);
+    }
+
     pid_t parentPid = getpid();
     fflush(stdout);
     pid_t pid = fork();
@@ -188,10 +241,20 @@ static pid_t summonMeeseeks(SharedState *shared, int level) {
         if (getppid() != parentPid) {
             exit(EXIT_FAILURE);
         }
-        closeInheritedFileDescriptors();
-        runMeeseeks(shared, level);
+        closeInheritedFileDescriptors(toChild[0], fromChild[1]);
+        runMeeseeks(shared, level, toChild[0], fromChild[1]);
     }
-    return pid;
+
+    close(toChild[0]);
+    close(fromChild[1]);
+    ChildLink child = { pid, toChild[1], fromChild[0] };
+    sendMessage(child.toChild, request);
+    return child;
+}
+
+static void closeChildLink(const ChildLink *child) {
+    close(child->toChild);
+    close(child->fromChild);
 }
 
 /* ---------------------------------------------------------------------- Box */
@@ -275,18 +338,26 @@ static void showHelp(void) {
     printf("   whether it was completed and how many Meeseeks were summoned.\n");
 }
 
-static void runTask(SharedState *shared) {
+static void runTask(SharedState *shared, const Message *request) {
     resetSharedCounters(shared);
     reserveSlots(shared, 1);
-    pid_t rootPid = summonMeeseeks(shared, 1);
-    setpgid(rootPid, rootPid);
-    waitpid(rootPid, NULL, 0);
-    printf("\nMeeseeks summoned for this request: %d\n", shared->totalCreated);
+    ChildLink root = summonMeeseeks(shared, 1, request);
+    setpgid(root.pid, root.pid);
+    waitpid(root.pid, NULL, 0);
+
+    Message outcome;
+    if (receiveMessage(root.fromChild, &outcome)) {
+        printf("\nOutcome: %s (%s)\n", outcome.type == MESSAGE_SOLVED ? "completed" : "not completed", outcome.text);
+    }
+    printf("Meeseeks summoned for this request: %d\n", shared->totalCreated);
+    closeChildLink(&root);
 }
 
 int main(void) {
     char option[INPUT_SIZE];
     setvbuf(stdout, NULL, _IOLBF, 0);
+    // Escribir STOP a un Meeseeks que ya terminó no debe matar al que escribe
+    signal(SIGPIPE, SIG_IGN);
     SharedState *shared = createSharedState();
 
     while (1) {
@@ -299,8 +370,12 @@ int main(void) {
         if (strcmp(option, "4") == 0) {
             showHelp();
         } else if (strcmp(option, "1") == 0) {
+            Message request = { .type = MESSAGE_REQUEST, .taskType = TASK_TEXT };
+            if (!readLine("Request: ", request.text, sizeof request.text)) {
+                break;
+            }
             printf("\n");
-            runTask(shared);
+            runTask(shared, &request);
         } else if (strcmp(option, "2") == 0 || strcmp(option, "3") == 0) {
             printf("\nNot available yet.\n");
         } else {
