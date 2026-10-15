@@ -167,7 +167,7 @@ static double randomUniform(double min, double max) {
 }
 
 static double randomDifficulty(void) {
-    // Irwin-Hall: el promedio de 3 uniformes forma una campana centrada en 50 que nunca sale de 0 a 100
+    // Bates (Irwin-Hall escalada): el promedio de 3 uniformes forma una campana centrada en 50 que nunca sale de 0 a 100
     return (randomUniform(0, 100) + randomUniform(0, 100) + randomUniform(0, 100)) / 3.0;
 }
 
